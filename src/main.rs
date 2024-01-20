@@ -1,27 +1,28 @@
-use axum::{
-    routing::{get, post},
-    Router,
-};
+use axum::http::{header, self};
+use axum::{routing::get, Router, Extension,  http::HeaderValue};
 use std::net::SocketAddr;
-use tower_http::cors::{CorsLayer, Any};
+extern crate dotenv;
+
+use dotenv::dotenv;
+use std::env;
+use std::str::FromStr;
+use tower_http::cors::{CorsLayer, AllowOrigin, AllowMethods, AllowHeaders};
 use std::sync::Arc;
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
+use sqlx::postgres::PgPoolOptions;
+use http::Method;
 
 mod handlers;
 use crate::handlers::locations::{};
-use crate::handlers::organizations::{get_organization_by_id, get_staff_user, create_organization};
+use crate::handlers::organizations::{get_organization, get_org_user, get_org_shifts};
 use crate::handlers::people::{get_people, get_person};
-use crate::handlers::users::{};
-
-
-pub struct AppState {
-    db: Pool<Postgres>,
-}
+use crate::handlers::users::{get_user, register_user, login_user};
 
 #[tokio::main]
 async fn main() {
-    // Database URL
-    let database_url = "postgres://postgres:postgres@localhost:5432/ppdb";
+    dotenv().ok();
+
+    let database_url = env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set");
 
     // Setting up the database connection pool
     let pool = PgPoolOptions::new()
@@ -35,28 +36,42 @@ async fn main() {
         eprintln!("Failed to run database migrations: {:?}", e);
         std::process::exit(1);
     }
+    
+    // Configure CORS
+    let cors = CorsLayer::new()
+        .allow_methods(vec![Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers(vec![
+            http::header::AUTHORIZATION, 
+            http::header::ACCEPT, 
+            http::header::CONTENT_TYPE
+        ])
+        .allow_origin(AllowOrigin::exact(
+            HeaderValue::from_str("http://localhost:3000").unwrap()
+        ))
+        .allow_credentials(true);
+    let pool = Arc::new(pool);
 
-    // CORS configuration
-    let cors = CorsLayer::new().allow_origin(Any);
+    // Routers
+    let user_routes = Router::new()
+    .route("/:id", get(get_user));
 
-    // Building the Axum application
-    let app_state = Arc::new(AppState { db: pool });
-
-    // Grouping organization related routes
     let organization_routes = Router::new()
-    .route("/:id/staff/:user_id", get(get_staff_user))
-    .route("/", post(create_organization));
+    .route("/:id", get(get_organization))
+    .route("/:id/me/:user_id", get(get_org_user))
+    .route("/:id/shifts", get(get_org_shifts));
 
-    // Grouping people related routes
     let people_routes = Router::new()
     .route("/", get(get_people))
     .route("/person", get(get_person));
 
     let app = Router::new()
         .route("/", get(root))
+        .route("/register", axum::routing::post(register_user))
+        .route("/login", axum::routing::post(login_user))
+        .nest("/users", user_routes)
         .nest("/organizations", organization_routes)
         .nest("/people", people_routes)
-        .layer(axum::extract::Extension(app_state.clone()))
+        .layer(Extension(pool.clone()))
         .layer(cors);
 
     // Server address

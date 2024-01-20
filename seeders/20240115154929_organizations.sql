@@ -1,0 +1,4 @@
+INSERT INTO organizations (id, name, description, contact_email, contact_phone, billing_address, status, logo_url, legal_name, tax_id, industry, size, timezone, locale, secondary_contact_email, secondary_contact_phone, created_at, updated_at)
+VALUES
+('1679091c-5a88-442f-9383-0a9f2a02a8a9', 'Organization One', 'Description One', 'contact@orgone.com', '1234567890', 'Address One', 'Active', 'http://logo.url/one', 'Legal Organization One', 'TaxID1', 'Industry1', 100, 'UTC', 'en-US', 'secondary@orgone.com', '0987654321', NOW(), NOW()),
+('8f14e45f-e8f1-4d26-bfcf-44ce29ed702a', 'Organization Two', 'Description Two', 'contact@orgtwo.com', '1234567891', 'Address Two', 'Active', 'http://logo.url/two', 'Legal Organization Two', 'TaxID2', 'Industry2', 200, 'UTC', 'en-US', 'secondary@orgtwo.com', '0987654322', NOW(), NOW());

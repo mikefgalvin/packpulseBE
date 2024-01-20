@@ -1,1 +1,20 @@
--- Add migration script here
+CREATE TABLE IF NOT EXISTS organizations (
+    id UUID PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    contact_email VARCHAR(255),
+    contact_phone VARCHAR(20),
+    billing_address TEXT,
+    status VARCHAR(50),
+    logo_url TEXT,
+    legal_name VARCHAR(255),
+    tax_id VARCHAR(50),
+    industry VARCHAR(100),
+    size INT,
+    timezone VARCHAR(50),
+    locale VARCHAR(50),
+    secondary_contact_email VARCHAR(255),
+    secondary_contact_phone VARCHAR(20),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE
+);
