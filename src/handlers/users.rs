@@ -1,4 +1,4 @@
-use axum::{http::StatusCode, response::IntoResponse, Json, extract::{Path, self}, Extension};
+use axum::{http::{StatusCode,header::{SET_COOKIE, self}, HeaderValue}, response::{IntoResponse, Response}, Json, extract::{State, self}, Extension};
 use axum_macros::debug_handler;
 use chrono::{Utc, Duration};
 use serde::{Serialize, Deserialize};
@@ -8,6 +8,11 @@ use uuid::Uuid;
 use std::sync::Arc;
 use bcrypt::{hash, DEFAULT_COST};
 use jsonwebtoken::{encode, decode, EncodingKey, Validation, Algorithm, DecodingKey, Header};
+use cookie::CookieBuilder;
+use cookie::time::Duration as CookieDuration;
+
+use crate::auth_middleware::AuthenticatedUser;
+
 
 // STRUCTS
 
@@ -17,13 +22,21 @@ struct Claims {
     exp: usize,      // Expiry
 }
 
-#[derive(Serialize, Deserialize, FromRow)] // Add FromRow here
+#[derive(Serialize, Deserialize, FromRow)]
 pub struct User {
     pub id: Uuid,
     pub first_name: String,
     pub last_name: String,
     pub email: String,
     password_hash: String,
+}
+
+#[derive(Serialize, Deserialize, FromRow)]
+pub struct UserClient {
+    pub id: Uuid,
+    pub first_name: String,
+    pub last_name: String,
+    pub email: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -45,7 +58,7 @@ pub struct NewUser {
 
 #[derive(Serialize)]
 pub struct UserWithToken {
-    pub user: User,
+    pub user: UserClient,
     pub token: String,
 }
 
@@ -83,18 +96,23 @@ async fn hash_password(password: &str) -> Result<String, bcrypt::BcryptError> {
 }
 
 // ENDPOINTS
-
 pub async fn register_user(
-    Extension(pool): Extension<Arc<PgPool>>,
+    State(pool): State<Arc<PgPool>>,
     extract::Json(payload): extract::Json<NewUser>,
-) -> Result<Json<UserWithToken>, (StatusCode, String)> {
+) -> impl IntoResponse {
+
     let hashed_password = match hash_password(&payload.password).await {
         Ok(hash) => hash,
-        Err(_) => return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to hash password".to_string())),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to hash password".to_string()
+            ).into_response();
+        }
     };
 
-    match sqlx::query_as::<_, User>(
-        "INSERT INTO users (first_name, last_name, email, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, first_name, last_name, email, password_hash")
+    match sqlx::query_as::<_, UserClient>(
+        "INSERT INTO users (first_name, last_name, email, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, first_name, last_name, email")
         .bind(&payload.first_name)
         .bind(&payload.last_name)
         .bind(&payload.email)
@@ -104,12 +122,37 @@ pub async fn register_user(
             Ok(user) => {
                 // Create JWT token
                 let token = generate_jwt(user.id);
-                Ok(Json(UserWithToken { user, token }))
+                // Create the cookie
+                let cookie = CookieBuilder::new("token", token)
+                    .http_only(true) // HTTP-only for security
+                    .secure(true) // Secure, sent over HTTPS only
+                    .path("/") // Available on all paths
+                    .max_age(CookieDuration::days(60))
+                    .build();
+
+                // Construct the response
+                let response_body = json!({
+                    "success": true,
+                    "user": {
+                        "id": user.id,
+                        "first_name": user.first_name,
+                        "last_name": user.last_name,
+                        "email": user.email
+                    }
+                });
+
+                let cookie = cookie.to_string();
+
+                (
+                    StatusCode::OK,
+                    [(header::SET_COOKIE, cookie)],
+                    Json(response_body),
+                ).into_response()
+
             },
-    
             Err(e) => {
                 eprintln!("Failed to execute query: {:?}", e);
-                Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to register user".to_string()))
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to register user".to_string()).into_response()
             },
     }
 }
@@ -136,48 +179,46 @@ pub async fn login_user(
     }
 }
 
-
-
-
-
 pub async fn get_user(
-    Path(user_id): Path<String>,
     Extension(pool): Extension<Arc<PgPool>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
+    // Use the user_id from the AuthenticatedUser extension
+    let user_id = auth_user.id;
+
     let result = sqlx::query(
         "SELECT 
-        json_build_object(
-            'id', u.id, 
-            'first_name', u.first_name, 
-            'last_name', u.last_name, 
-            'email', u.email,
-            'organizations', (SELECT json_agg(json_build_object('id', o.id, 'name', o.name))
-                              FROM organizations o
-                              JOIN org_staff os ON o.id = os.organization_id
-                              WHERE os.user_id = u.id),
-            'locations', (SELECT json_agg(json_build_object('id', l.id, 'name', l.name, 'type', l.type))
-                          FROM locations l
-                          JOIN org_locations ol ON l.id = ol.location_id
-                          JOIN organizations o ON ol.organization_id = o.id
-                          JOIN org_staff os ON o.id = os.organization_id 
-                          WHERE os.user_id = u.id)
-        ) as user_data
-    FROM 
-        users u
-        WHERE u.id = $1::uuid"
-    )
-    .bind(user_id)
-    .fetch_one(&*pool)
-    .await;
+                    json_build_object(
+                        'id', u.id, 
+                        'first_name', u.first_name, 
+                        'last_name', u.last_name, 
+                        'email', u.email,
+                        'organizations', (SELECT json_agg(json_build_object('id', o.id, 'name', o.name))
+                                          FROM organizations o
+                                          JOIN org_staff os ON o.id = os.organization_id
+                                          WHERE os.user_id = u.id::uuid),
+                        'locations', (SELECT json_agg(json_build_object('id', l.id, 'name', l.name, 'type', l.type))
+                                      FROM locations l
+                                      JOIN org_locations ol ON l.id = ol.location_id
+                                      JOIN organizations o ON ol.organization_id = o.id
+                                      JOIN org_staff os ON o.id = os.organization_id 
+                                      WHERE os.user_id = u.id::uuid)
+                    ) as user_data
+                FROM 
+                    users u
+                    WHERE u.id = $1::uuid")
+        .bind(user_id)
+        .fetch_one(&*pool)
+        .await;
 
-    match result {
-        Ok(row) => {
-            let user_data: JsonValue = row.get("user_data");
-            (StatusCode::OK, Json(user_data))
-        },
-        Err(e) => {
-            eprintln!("Failed to execute query: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Internal server error"})))
+        match result {
+            Ok(row) => {
+                let user_data: serde_json::Value = row.try_get("user_data").unwrap_or_else(|_| json!({}));
+                (StatusCode::OK, Json(user_data))
+            },
+            Err(e) => {
+                eprintln!("Failed to execute query: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Internal server error"})))
+            }
         }
     }
-}
