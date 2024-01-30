@@ -1,0 +1,1 @@
+fn(axum::extract::State<Arc<Pool<Postgres>>>, axum::extract::State<AuthenticatedUser>) -> impl std::future::Future<Output = impl IntoResponse> {get_user}

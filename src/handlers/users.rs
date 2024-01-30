@@ -1,5 +1,4 @@
 use axum::{http::{StatusCode,header::{SET_COOKIE, self}, HeaderValue}, response::{IntoResponse, Response}, Json, extract::{State, self}, Extension};
-use axum_macros::debug_handler;
 use chrono::{Utc, Duration};
 use serde::{Serialize, Deserialize};
 use serde_json::{Value as JsonValue, json};
@@ -80,7 +79,8 @@ pub struct UserWithDetails {
 fn generate_jwt(user_id: uuid::Uuid) -> String {
     let expiration = (Utc::now() + Duration::days(30)).timestamp() as usize;
     let claims = Claims { sub: user_id, exp: expiration };
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret("your_secret".as_ref())).unwrap()
+    let secret_key = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(secret_key.as_ref())).unwrap()
 }
 
 fn validate_jwt(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
@@ -125,7 +125,7 @@ pub async fn register_user(
                 // Create the cookie
                 let cookie = CookieBuilder::new("token", token)
                     .http_only(true) // HTTP-only for security
-                    .secure(true) // Secure, sent over HTTPS only
+                    // .secure(true) // Secure, sent over HTTPS only
                     .path("/") // Available on all paths
                     .max_age(CookieDuration::days(60))
                     .build();
@@ -148,7 +148,6 @@ pub async fn register_user(
                     [(header::SET_COOKIE, cookie)],
                     Json(response_body),
                 ).into_response()
-
             },
             Err(e) => {
                 eprintln!("Failed to execute query: {:?}", e);
@@ -158,9 +157,9 @@ pub async fn register_user(
 }
 
 pub async fn login_user(
-    Extension(pool): Extension<Arc<PgPool>>,
+    State(pool): State<Arc<PgPool>>,
     extract::Json(payload): extract::Json<LoginRequest>,
-) -> Result<(StatusCode, String), (StatusCode, String)> {
+) -> impl IntoResponse {
     let db_user = sqlx::query_as::<_, DbUser>("SELECT * FROM users WHERE email = $1")
         .bind(&payload.email)
         .fetch_one(&*pool)
@@ -170,17 +169,40 @@ pub async fn login_user(
         Ok(user) => {
             if bcrypt::verify(&payload.password, &user.password_hash).unwrap_or(false) {
                 let token = generate_jwt(user.id);
-                Ok((StatusCode::OK, token))
+
+                // Create the cookie
+                let cookie = CookieBuilder::new("token", token)
+                    .http_only(true) // HTTP-only for security
+                    .secure(true) // HTTPS
+                    .path("/") // Available on all paths
+                    .max_age(CookieDuration::days(60))
+                    .build();
+
+                // Construct the response body
+                let response_body = json!({
+                    "success": true,
+                    "user": {
+                        "id": user.id,
+                        "first_name": user.first_name,
+                        "last_name": user.last_name,
+                        "email": user.email
+                    }
+                });
+
+                let mut response = Json(response_body).into_response();
+                response.headers_mut().insert(SET_COOKIE, cookie.to_string().parse().unwrap());
+                response
+
             } else {
-                Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))
+                (StatusCode::UNAUTHORIZED, "Invalid credentials").into_response()
             }
         },
-        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").into_response(),
     }
 }
 
 pub async fn get_user(
-    Extension(pool): Extension<Arc<PgPool>>,
+    State(pool): State<Arc<PgPool>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
     // Use the user_id from the AuthenticatedUser extension

@@ -1,7 +1,7 @@
 use axum::{
     routing::{get, post}, Router, 
-    http::{HeaderValue, self, Request, Response, StatusCode},
-    middleware::{self, Next}
+    http::{HeaderValue, self},
+    middleware::map_request
 };
 use std::net::SocketAddr;
 extern crate dotenv;
@@ -14,12 +14,12 @@ use sqlx::postgres::PgPoolOptions;
 use http::Method;
 
 mod handlers;
-use crate::handlers::organizations::{get_organization, get_org_user, get_org_shifts};
+use crate::handlers::organizations::{get_organization, get_org_user, get_org_shifts, get_user_org_shifts};
 use crate::handlers::people::{get_people, get_person};
 use crate::handlers::users::{get_user, register_user, login_user};
 
 mod auth_middleware;
-use crate::auth_middleware::auth_middleware;
+use crate::auth_middleware::auth;
 
 
 #[tokio::main]
@@ -60,20 +60,21 @@ async fn main() {
     let user_routes = Router::new()
         .route("/me", get(get_user))
         .with_state(pool.clone())
-        .route_layer(middleware::from_fn(auth_middleware));
+        .route_layer(map_request(auth));
 
     let organization_routes = Router::new()
         .route("/:id", get(get_organization))
         .route("/:id/me/:user_id", get(get_org_user))
         .route("/:id/shifts", get(get_org_shifts))
+        .route("/:id/my-shifts", get(get_user_org_shifts))
         .with_state(pool.clone())
-        .route_layer(middleware::from_fn(auth_middleware));
+        .route_layer(map_request(auth));
 
     let people_routes = Router::new()
         .route("/", get(get_people))
         .route("/person", get(get_person))
         .with_state(pool.clone())
-        .route_layer(middleware::from_fn(auth_middleware));
+        .route_layer(map_request(auth));
 
     let auth_routes = Router::new()
         .route("/register", post(register_user))
@@ -85,11 +86,10 @@ async fn main() {
         .nest("/users", user_routes)
         .nest("/organizations", organization_routes)
         .nest("/people", people_routes)
-        .with_state(cors);
+        .route_layer(cors);
 
     // Server address
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    println!("Listening on {}", addr);
 
     // Starting the server
     axum::Server::bind(&addr)
