@@ -127,32 +127,83 @@ pub async fn get_org_user(
 }
 
 pub async fn get_org_shifts(
-    Path(organization_id): Path<Uuid>,
-    Extension(pool): Extension<Arc<PgPool>>,
+    Path(organization_id): Path<String>,
+    State(pool): State<Arc<PgPool>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
-    let result = sqlx::query_as!(
-        OrgShiftData,
-        "select s.id, s.start_timestamp as start, s.end_timestamp as end, s.timezone as title
-        from shifts s 
-        join shift_org_staff sos on sos.shift_id = s.id 
-        join org_staff os on os.id = sos.org_staff_id 
-        where s.organization_id = $1",
-        organization_id
+    let user_id = auth_user.id;
+    
+    let result = sqlx::query(
+    "SELECT 
+            s.id,
+            s.start_timestamp as start, 
+            s.end_timestamp as end, 
+            l.name as title,
+            l.address,
+            l.description,
+            s.rrule,
+            s.notes,
+            CASE 
+                WHEN COUNT(os.id) > 0 THEN 'blue'
+                ELSE 'red'
+            END as color,
+            s.extended_props,
+            json_agg(
+                jsonb_build_object(
+                    'staff_id', os.id,
+                    'user_id', os.user_id,
+                    'first_name', u.first_name,
+                    'last_name', u.last_name,
+                    'org_title', os.title
+                )
+            ) FILTER (WHERE os.id IS NOT NULL) as assigned
+        FROM shifts s
+        JOIN locations l ON l.id = s.location_id
+        LEFT JOIN shift_org_staff sos ON sos.shift_id = s.id
+        LEFT JOIN org_staff os ON os.id = sos.org_staff_id
+        LEFT JOIN users u on u.id = os.user_id
+        WHERE s.organization_id = $1::uuid
+        AND EXISTS (
+            SELECT 1
+            FROM org_staff admin_os
+            WHERE admin_os.user_id = $2::uuid
+            AND admin_os.admin_assigned_at IS NOT NULL
+            AND admin_os.organization_id = s.organization_id
+        )
+        GROUP BY s.id, l.id"
     )
-    .fetch_one(&*pool)
+    .bind(organization_id)
+    .bind(user_id)
+    .fetch_all(&*pool)
     .await;
 
     match result {
-        Ok(org_shift_data) => {
-            (StatusCode::OK, Json(org_shift_data)).into_response()
+        Ok(rows) => {
+            let shifts_data: Vec<serde_json::Value> = rows.into_iter().map(|row| {
+                json!({
+                    "id": row.try_get::<DateTime<Utc>, _>("id").unwrap_or_default(),
+                    "start": row.try_get::<DateTime<Utc>, _>("start").unwrap_or_default(),
+                    "end": row.try_get::<DateTime<Utc>, _>("end").unwrap_or_default(),
+                    "title": row.try_get::<String, _>("title").unwrap_or_default(),
+                    "address": row.try_get::<String, _>("address").unwrap_or_default(),
+                    "description": row.try_get::<String, _>("description").unwrap_or_default(),
+                    "rrule": row.try_get::<String, _>("rrule").unwrap_or_default(),
+                    "notes": row.try_get::<String, _>("notes").unwrap_or_default(),
+                    "color":row.try_get::<String, _>("color").unwrap_or_default(),
+                    "assigned": row.try_get::<serde_json::Value, _>("assigned").unwrap_or_default(),
+                    "extended_props": row.try_get::<serde_json::Value, _>("extended_props").unwrap_or_default(),
+                })
+            }).collect();
+    
+            (StatusCode::OK, Json(shifts_data))
         },
         Err(e) => {
             eprintln!("Failed to execute query: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR, 
-                Json(json!({"error": "Internal server error"}))
-            ).into_response()
+            // Return an error in the same format (Vec<JsonValue>)
+            let error_response = vec![json!({"error": "Internal server error"})];
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
+    
     }
 }
 
@@ -192,7 +243,10 @@ pub async fn get_user_org_shifts(
                     "end": row.try_get::<DateTime<Utc>, _>("end").unwrap_or_default(),
                     "title": row.try_get::<String, _>("title").unwrap_or_default(),
                     "address": row.try_get::<String, _>("address").unwrap_or_default(),
-                    // add other fields as necessary
+                    "description": row.try_get::<String, _>("description").unwrap_or_default(),
+                    "rrule": row.try_get::<String, _>("rrule").unwrap_or_default(),
+                    "notes": row.try_get::<String, _>("notes").unwrap_or_default(),
+                    "extended_props": row.try_get::<serde_json::Value, _>("extended_props").unwrap_or_default(),
                 })
             }).collect();
     

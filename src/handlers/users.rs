@@ -215,7 +215,14 @@ pub async fn get_user(
                         'first_name', u.first_name, 
                         'last_name', u.last_name, 
                         'email', u.email,
-                        'organizations', (SELECT json_agg(json_build_object('id', o.id, 'name', o.name))
+                        'organizations', (SELECT json_agg(json_build_object(
+                                            'id', o.id, 
+                                            'name', o.name,
+                                            'description', o.description,
+                                            'title', os.title,
+                                            'admin', os.admin_assigned_at,
+                                            'member_since', os.created_at
+                                        ))
                                           FROM organizations o
                                           JOIN org_staff os ON o.id = os.organization_id
                                           WHERE os.user_id = u.id::uuid),
