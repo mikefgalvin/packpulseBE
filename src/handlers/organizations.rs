@@ -1,12 +1,12 @@
-use axum::extract::State;
+use axum::extract::{State, self};
 use axum::{http::StatusCode, response::IntoResponse, Json, extract::Path, Extension};
 use serde::{Serialize, Deserialize};
 use serde_json::{Value as JsonValue, json};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, Executor};
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::DateTime;
-use chrono::Utc;
+use chrono::{ Utc, DateTime};
+use rrule::{RRuleSet, Tz};
 
 use crate::auth_middleware::AuthenticatedUser;
 
@@ -30,6 +30,17 @@ struct OrgShiftData {
     title: Option<String>,
 }
 
+
+#[derive(Debug, Deserialize)]
+struct ShiftPayload {
+    organization_id: Uuid,
+    location_id: Uuid,
+    start_time: DateTime<Utc>, // Assuming startTime includes the timezone
+    end_time: DateTime<Utc>, // Assuming endTime includes the timezone
+    notes: String,
+    rrule: String,
+    assigned_staff: Vec<String>,
+}
 
 pub async fn get_organization(
     Path(organization_id): Path<String>,
@@ -262,3 +273,62 @@ pub async fn get_user_org_shifts(
     }
 }
 
+pub async fn create_shift(
+    Path(organization_id): Path<String>,
+    State(pool): State<Arc<PgPool>>,
+    extract::Json(payload): extract::Json<ShiftPayload>,
+) -> impl IntoResponse {
+    // Parse the RRuleSet from the payload's rrule string
+    let rrule_set: RRuleSet = payload.rrule.parse().unwrap_or_else(|_| panic!("Failed to parse RRule string"));
+
+    // Generate occurrences with a limit to avoid infinite loops
+    let limit = 100;
+    let occurrences = rrule_set.all(limit).dates;
+
+    for &occurrence in &occurrences {
+        // Directly use organization_id and location_id as they are already Uuids
+        let shift_result = sqlx::query!(
+            "INSERT INTO shifts (organization_id, location_id, start_timestamp, end_timestamp, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            payload.organization_id,
+            payload.location_id,
+            occurrence,
+            occurrence + (payload.end_time - payload.start_time), // This line may need adjustment based on how you calculate the end time for each occurrence
+            payload.notes
+        )
+        .fetch_one(&*pool)
+        .await;
+    
+        match shift_result {
+            Ok(record) => {
+                let shift_id = record.id; // Assuming `id` is the name of the column in your RETURNING clause
+    
+                // Use `shift_id` for your staff assignments, converting assigned_staff member IDs from String to Uuid
+                for staff_id_str in &payload.assigned_staff {
+                    let staff_id = staff_id_str.parse::<Uuid>()
+                        .expect("Failed to parse staff_id into Uuid");
+                    
+                    let _ = sqlx::query!(
+                        "INSERT INTO shift_org_staff (shift_id, org_staff_id) VALUES ($1, $2)",
+                        shift_id,
+                        staff_id
+                    )
+                    .execute(&*pool)
+                    .await
+                    .map_err(|e| {
+                        eprintln!("Failed to assign staff to shift: {:?}", e);
+                        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to assign staff: {}", e)).into_response();
+                    })?;
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to insert shift: {:?}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create shift: {}", e)).into_response();
+            },
+        }
+    }
+    
+    // Optionally handle assigned staff
+    // For each `occurrence`, you might need to create associations in `org_staff_shifts` table
+
+    (StatusCode::OK, format!("Successfully created {} shifts.", occurrences.len())).into_response()
+}
